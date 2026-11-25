@@ -55,7 +55,7 @@ export default function MandatairePVView({ currentUser }: MandatairePVViewProps)
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-slate-700 bg-white border border-slate-200 px-3 py-1 rounded-lg">
+          <span className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 px-3 py-1 rounded-lg">
             {bureauNom}
           </span>
         </div>
@@ -108,7 +108,7 @@ export default function MandatairePVView({ currentUser }: MandatairePVViewProps)
                   <span className="text-xs font-bold text-slate-900 block">
                     Prendre une photo ou sélectionner un document
                   </span>
-                  <span className="text-[10px] text-slate-400 font-mono block mt-1">
+                  <span className="text-[10px] text-slate-500 block mt-1">
                     Format JPG ou PNG • Résolution claire et lisible
                   </span>
                 </div>
@@ -116,7 +116,7 @@ export default function MandatairePVView({ currentUser }: MandatairePVViewProps)
             </div>
 
             {timestamp && (
-              <div className="text-xs font-mono text-slate-600 flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="text-xs font-medium text-slate-600 flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-200">
                 <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span>Horodatage de capture : {timestamp}</span>
               </div>

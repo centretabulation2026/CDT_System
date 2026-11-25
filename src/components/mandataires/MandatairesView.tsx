@@ -1,9 +1,11 @@
 "use client";
 
 import React, { useState, useMemo, useRef } from "react";
-import { Plus, Trash2, Search, User, Upload, CheckCircle2, Clock, Mail, Send, RefreshCw } from "lucide-react";
+import { Plus, Trash2, Search, User, Upload, CheckCircle2, Clock, Mail, RefreshCw, AlertCircle, X, FileSpreadsheet, FileText, Eye, EyeOff, Lock } from "lucide-react";
 import { BureauDeVote } from "@/components/bureaux/BureauxView";
 import { generateMandataireActivationEmailHtml } from "@/lib/emailTemplates";
+import { CurrentUser } from "@/types/auth";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 export interface Mandataire {
   id: string;
@@ -22,6 +24,8 @@ export interface Mandataire {
   activationToken?: string;
   dateActivation?: string;
   password?: string;
+  partyId?: string;
+  tenantName?: string;
 }
 
 export const DEPARTEMENTS_HAITI = [
@@ -42,6 +46,7 @@ export const INITIAL_MANDATAIRES: Mandataire[] = [];
 interface MandatairesViewProps {
   mandatairesList?: Mandataire[];
   bureauxList?: BureauDeVote[];
+  currentUser?: CurrentUser;
   onAddMandataire?: (mandataire: Mandataire) => void;
   onDeleteMandataire?: (id: string) => void;
 }
@@ -49,6 +54,7 @@ interface MandatairesViewProps {
 export default function MandatairesView({
   mandatairesList = INITIAL_MANDATAIRES,
   bureauxList = [],
+  currentUser,
   onAddMandataire,
   onDeleteMandataire,
 }: MandatairesViewProps) {
@@ -70,12 +76,28 @@ export default function MandatairesView({
   const [departement, setDepartement] = useState(DEPARTEMENTS_HAITI[0]);
   const [ville, setVille] = useState("");
 
+  // Mot de passe d'accès défini directement par l'administrateur
+  const generateRandomPassword = () => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let rand = "";
+    for (let i = 0; i < 5; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `Mandataire2026$${rand}`;
+  };
+
+  const [password, setPassword] = useState(generateRandomPassword);
+  const [showPassword, setShowPassword] = useState(false);
+
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [topAlertMessage, setTopAlertMessage] = useState<string | null>(null);
+  const topAlertTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [resendingId, setResendingId] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [filterDepartement, setFilterDepartement] = useState("all");
+  const [showForm, setShowForm] = useState(false);
 
   React.useEffect(() => {
     if (mandatairesList) {
@@ -100,7 +122,7 @@ export default function MandatairesView({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -112,9 +134,62 @@ export default function MandatairesView({
     const cleanVille = ville.trim();
     const cleanAdresse = adresse.trim();
     const cleanNifCin = nifCin.trim();
+    const cleanPassword = password.trim() || generateRandomPassword();
 
-    if (!cleanNom || !cleanPrenom || !cleanVille || !cleanEmail) {
-      setErrorMessage("Veuillez remplir les champs obligatoires (*) incluant l'adresse e-mail.");
+    if (!cleanNom || !cleanPrenom || !cleanVille || !cleanEmail || !cleanPassword) {
+      setErrorMessage("Veuillez remplir les champs obligatoires (*) incluant l'adresse e-mail et le mot de passe d'accès.");
+      return;
+    }
+
+    // VÉRIFICATION D'UNICITÉ STRICTE : IMPOSSIBLE QU'UN MANDATAIRE SOIT MANDATÉ PAR DEUX PARTIS DIFFÉRENTS
+    let existingMandataire = mandataires.find(
+      (m) => m.email && m.email.trim().toLowerCase() === cleanEmail
+    );
+
+    if (!existingMandataire) {
+      try {
+        const storedAll = localStorage.getItem("cdt_mandataires");
+        if (storedAll) {
+          const allList: Mandataire[] = JSON.parse(storedAll);
+          existingMandataire = allList.find(
+            (m) => m.email && m.email.trim().toLowerCase() === cleanEmail
+          );
+        }
+      } catch (err) {}
+    }
+
+    if (!existingMandataire && mandatairesList) {
+      existingMandataire = mandatairesList.find(
+        (m) => m.email && m.email.trim().toLowerCase() === cleanEmail
+      );
+    }
+
+    if (!existingMandataire && isSupabaseConfigured) {
+      try {
+        const { data: supaM } = await supabase
+          .from("mandataires")
+          .select("id, email")
+          .ilike("email", cleanEmail)
+          .maybeSingle();
+        if (supaM) {
+          existingMandataire = supaM as any;
+        }
+      } catch (err) {}
+    }
+
+    if (existingMandataire) {
+      const duplicateError = "Ce mandataire est déjà sélectionné";
+      setTopAlertMessage(duplicateError);
+      setErrorMessage(duplicateError);
+
+      if (topAlertTimeoutRef.current) {
+        clearTimeout(topAlertTimeoutRef.current);
+      }
+      topAlertTimeoutRef.current = setTimeout(() => {
+        setTopAlertMessage(null);
+      }, 6000);
+
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
 
@@ -123,8 +198,17 @@ export default function MandatairesView({
         ? customBureau.trim() || "Non assigné"
         : bureauSelection;
 
-    const activationToken =
-      "mnd-" + Math.random().toString(36).substring(2) + Date.now().toString(36);
+    // Récupération dynamique du parti politique actif (ex: Parti Octacore)
+    let nomParti = currentUser?.tenantName || "Parti Octacore";
+    let partyId = currentUser?.tenantId || "";
+    try {
+      const storedUser = localStorage.getItem("cdt_current_user");
+      if (storedUser) {
+        const u = JSON.parse(storedUser);
+        if (u.tenantName) nomParti = u.tenantName;
+        if (u.tenantId) partyId = u.tenantId;
+      }
+    } catch (e) {}
 
     const newMandataire: Mandataire = {
       id: `mandataire-${Date.now()}`,
@@ -139,8 +223,10 @@ export default function MandatairesView({
       departement: departement,
       ville: cleanVille,
       dateAffectation: new Date().toLocaleDateString("fr-FR"),
-      statut: "en_attente",
-      activationToken: activationToken,
+      statut: "actif", // Mot de passe défini directement par l'administrateur
+      password: cleanPassword,
+      partyId: partyId,
+      tenantName: nomParti,
     };
 
     const updated = [newMandataire, ...mandataires];
@@ -149,46 +235,67 @@ export default function MandatairesView({
       onAddMandataire(newMandataire);
     }
 
-    // Récupération du nom du parti pour l'e-mail
-    let nomParti = "Parti Démocratique Uni";
-    try {
-      const storedUser = localStorage.getItem("cdt_current_user");
-      if (storedUser) {
-        const u = JSON.parse(storedUser);
-        if (u.tenantName) nomParti = u.tenantName;
-      }
-    } catch (e) {}
-
-    // Envoi automatique de l'e-mail d'activation avec lien sécurisé
-    const activationUrl = `${
+    // Envoi des identifiants officiels au mandataire
+    const loginUrl = `${
       typeof window !== "undefined" ? window.location.origin : ""
-    }/activation?token=${activationToken}&type=mandataire`;
+    }/login`;
 
-    const emailHtml = generateMandataireActivationEmailHtml({
-      nomParti,
-      prenom: cleanPrenom,
-      nom: cleanNom,
-      bureauAssigne: assignedBureauFinal,
-      departement,
-      ville: cleanVille,
-      email: cleanEmail,
-      activationUrl,
-    });
+    const credentialsEmailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
+        <div style="text-align: center; border-bottom: 2px solid #000B58; padding-bottom: 16px; margin-bottom: 20px;">
+          <h2 style="color: #000B58; margin: 0; font-size: 20px; font-weight: 800;">Espace Mandataire Officiel</h2>
+          <p style="color: #64748b; font-size: 13px; margin-top: 4px;">${nomParti} • Accréditation Électorale</p>
+        </div>
+
+        <p style="font-size: 14px; color: #1e293b; line-height: 1.5;">
+          Bonjour <strong>${cleanPrenom} ${cleanNom}</strong>,
+        </p>
+
+        <p style="font-size: 13px; color: #334155; line-height: 1.6;">
+          Votre compte mandataire officiel a été créé et activé par l'administrateur de votre parti. Vos identifiants sécurisés sont disponibles ci-dessous :
+        </p>
+
+        <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 20px 0;">
+          <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+            <strong>Identifiant (E-mail) :</strong> <span style="color: #000B58; font-weight: bold;">${cleanEmail}</span>
+          </p>
+          <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+            <strong>Mot de passe d'accès :</strong> <span style="color: #000B58; font-weight: bold;">${cleanPassword}</span>
+          </p>
+          <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+            <strong>Bureau de vote assigné :</strong> <span>${assignedBureauFinal}</span>
+          </p>
+          <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+            <strong>Localisation :</strong> <span>${cleanVille} (${departement})</span>
+          </p>
+        </div>
+
+        <div style="text-align: center; margin: 28px 0;">
+          <a href="${loginUrl}" style="background-color: #000B58; color: #ffffff; padding: 12px 28px; font-size: 13px; font-weight: bold; border-radius: 8px; text-decoration: none; display: inline-block;">
+            Accéder à mon Espace Mandataire
+          </a>
+        </div>
+
+        <p style="font-size: 11px; color: #64748b; line-height: 1.5; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-top: 24px;">
+          Centre de Tabulation Électoral (CDT) — Surveillance et intégrité du scrutin électoral.
+        </p>
+      </div>
+    `;
 
     fetch("/api/send-email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         to: cleanEmail,
-        subject: `Activation de votre Espace Mandataire • ${nomParti}`,
-        html: emailHtml,
+        subject: `Vos identifiants d'accès • Espace Mandataire ${nomParti}`,
+        html: credentialsEmailHtml,
       }),
     }).catch((err) =>
-      console.error("Erreur lors de l'envoi de l'e-mail d'activation:", err)
+      console.error("Erreur lors de l'envoi des identifiants mandataire:", err)
     );
 
     setSuccessMessage(
-      `Mandataire « ${cleanPrenom} ${cleanNom} » enregistré avec succès ! Un e-mail d'activation a été automatiquement envoyé à ${cleanEmail} avec le lien pour définir son mot de passe.`
+      `Mandataire « ${cleanPrenom} ${cleanNom} » enregistré et activé avec succès. Ses identifiants de connexion ont été envoyés à ${cleanEmail}.`
     );
     setNom("");
     setPrenom("");
@@ -202,6 +309,7 @@ export default function MandatairesView({
     setAdresse("");
     setNifCin("");
     setVille("");
+    setPassword(generateRandomPassword());
 
     setTimeout(() => setSuccessMessage(null), 6000);
   };
@@ -215,7 +323,7 @@ export default function MandatairesView({
     setErrorMessage(null);
 
     try {
-      let nomParti = "Parti Démocratique Uni";
+      let nomParti = currentUser?.tenantName || m.tenantName || "Parti Octacore";
       try {
         const storedUser = localStorage.getItem("cdt_current_user");
         if (storedUser) {
@@ -224,71 +332,323 @@ export default function MandatairesView({
         }
       } catch (e) {}
 
-      // Utiliser le jeton existant ou en créer un nouveau
-      const token =
-        m.activationToken ||
-        `mnd-${Math.random().toString(36).substring(2)}${Date.now().toString(36)}`;
-
-      if (!m.activationToken) {
-        const updated = mandataires.map((item) =>
-          item.id === m.id ? { ...item, activationToken: token } : item
-        );
-        setMandataires(updated);
-        try {
-          localStorage.setItem("cdt_mandataires", JSON.stringify(updated));
-        } catch (e) {}
-      }
-
-      const activationUrl = `${
+      const loginUrl = `${
         typeof window !== "undefined" ? window.location.origin : ""
-      }/activation?token=${token}&type=mandataire`;
+      }/login`;
 
-      const emailHtml = generateMandataireActivationEmailHtml({
-        nomParti,
-        prenom: m.prenom,
-        nom: m.nom,
-        bureauAssigne: m.bureauAssigne,
-        departement: m.departement,
-        ville: m.ville,
-        email: m.email,
-        activationUrl,
-      });
+      const credentialsEmailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
+          <div style="text-align: center; border-bottom: 2px solid #000B58; padding-bottom: 16px; margin-bottom: 20px;">
+            <h2 style="color: #000B58; margin: 0; font-size: 20px; font-weight: 800;">Espace Mandataire Officiel</h2>
+            <p style="color: #64748b; font-size: 13px; margin-top: 4px;">${nomParti} • Accréditation Électorale</p>
+          </div>
+
+          <p style="font-size: 14px; color: #1e293b; line-height: 1.5;">
+            Bonjour <strong>${m.prenom} ${m.nom}</strong>,
+          </p>
+
+          <p style="font-size: 13px; color: #334155; line-height: 1.6;">
+            Voici vos identifiants d'accès sécurisés à votre Espace Mandataire officiel pour le scrutin électoral :
+          </p>
+
+          <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 20px 0;">
+            <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+              <strong>Identifiant (E-mail) :</strong> <span style="color: #000B58; font-weight: bold;">${m.email}</span>
+            </p>
+            <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+              <strong>Mot de passe d'accès :</strong> <span style="color: #000B58; font-weight: bold;">${m.password || "Mandataire2026$"}</span>
+            </p>
+            <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+              <strong>Bureau de vote assigné :</strong> <span>${m.bureauAssigne}</span>
+            </p>
+            <p style="margin: 6px 0; font-size: 13px; color: #0f172a;">
+              <strong>Localisation :</strong> <span>${m.ville} (${m.departement})</span>
+            </p>
+          </div>
+
+          <div style="text-align: center; margin: 28px 0;">
+            <a href="${loginUrl}" style="background-color: #000B58; color: #ffffff; padding: 12px 28px; font-size: 13px; font-weight: bold; border-radius: 8px; text-decoration: none; display: inline-block;">
+              Accéder à mon Espace Mandataire
+            </a>
+          </div>
+
+          <p style="font-size: 11px; color: #64748b; line-height: 1.5; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-top: 24px;">
+            Centre de Tabulation Électoral (CDT) — Surveillance et intégrité du scrutin électoral.
+          </p>
+        </div>
+      `;
 
       const res = await fetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           to: m.email,
-          subject: `Rappel : Activation de votre Espace Mandataire • ${nomParti}`,
-          html: emailHtml,
+          subject: `Vos identifiants d'accès • Espace Mandataire ${nomParti}`,
+          html: credentialsEmailHtml,
         }),
       });
 
       const result = await res.json();
       if (result.success) {
-        setSuccessMessage(`E-mail d'activation renvoyé avec succès à ${m.email}.`);
+        setSuccessMessage(`Identifiants renvoyés avec succès à ${m.email}.`);
       } else {
         setErrorMessage("L'envoi a rencontré une difficulté : " + (result.error || ""));
       }
       setTimeout(() => setSuccessMessage(null), 5000);
     } catch (err) {
       console.error(err);
-      setErrorMessage("Échec du renvoi de l'e-mail d'activation.");
+      setErrorMessage("Échec du renvoi des identifiants.");
     } finally {
       setResendingId(null);
     }
   };
 
   const handleDelete = (id: string, fullName: string) => {
-    if (confirm(`Confirmez-vous la suppression du mandataire « ${fullName} » ?`)) {
+    if (confirm(`Confirmez-vous la suppression du mandataire ${fullName} ?`)) {
       const updated = mandataires.filter((m) => m.id !== id);
       setMandataires(updated);
       if (onDeleteMandataire) {
         onDeleteMandataire(id);
       }
-      setSuccessMessage(`Mandataire retiré.`);
+      setSuccessMessage("Mandataire supprimé avec succès.");
       setTimeout(() => setSuccessMessage(null), 2500);
     }
+  };
+
+  const currentPartyName = useMemo(() => {
+    let name = currentUser?.tenantName || "Parti Octacore";
+    try {
+      const storedUser = localStorage.getItem("cdt_current_user");
+      if (storedUser) {
+        const u = JSON.parse(storedUser);
+        if (u.tenantName) name = u.tenantName;
+      }
+    } catch (e) {}
+    return name;
+  }, [currentUser]);
+
+  // EXPORT EXCEL (VERT SOLIDE)
+  const handleExportExcel = () => {
+    if (filteredMandataires.length === 0) {
+      alert("Aucune donnée à exporter.");
+      return;
+    }
+
+    const headers = [
+      "Nom",
+      "Prénom",
+      "Email",
+      "Téléphone",
+      "Bureau Assigné",
+      "Département",
+      "Ville",
+      "NIF / CIN",
+      "Adresse",
+      "Statut",
+      "Date d'enregistrement"
+    ];
+
+    const rows = filteredMandataires.map((m) => [
+      `"${(m.nom || "").replace(/"/g, '""')}"`,
+      `"${(m.prenom || "").replace(/"/g, '""')}"`,
+      `"${(m.email || "").replace(/"/g, '""')}"`,
+      `"${(m.telephone || "").replace(/"/g, '""')}"`,
+      `"${(m.bureauAssigne || "").replace(/"/g, '""')}"`,
+      `"${(m.departement || "").replace(/"/g, '""')}"`,
+      `"${(m.ville || "").replace(/"/g, '""')}"`,
+      `"${(m.nifCin || "").replace(/"/g, '""')}"`,
+      `"${(m.adresse || "").replace(/"/g, '""')}"`,
+      `"${m.statut === "actif" ? "Actif" : "En attente"}"`,
+      `"${m.dateAffectation || ""}"`
+    ]);
+
+    const csvContent =
+      "\uFEFF" +
+      [headers.join(";"), ...rows.map((r) => r.join(";"))].join("\r\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    const safeParty = currentPartyName.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    link.setAttribute("download", `mandataires_${safeParty}_${dateStr}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // EXPORT PDF (ROUGE)
+  const handleExportPDF = () => {
+    if (filteredMandataires.length === 0) {
+      alert("Aucune donnée à exporter.");
+      return;
+    }
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      alert("Veuillez autoriser les fenêtres contextuelles pour exporter le PDF.");
+      return;
+    }
+
+    const dateStr = new Date().toLocaleDateString("fr-FR", {
+      day: "numeric",
+      month: "long",
+      year: "numeric"
+    });
+
+    const rowsHtml = filteredMandataires
+      .map(
+        (m, idx) => `
+        <tr>
+          <td style="text-align: center; font-weight: bold;">${idx + 1}</td>
+          <td><strong>${m.prenom} ${m.nom}</strong><br><span style="font-size: 10px; color: #64748b;">${m.email || ""}</span></td>
+          <td>${m.bureauAssigne || "Non assigné"}</td>
+          <td>${m.telephone || "—"}</td>
+          <td>${m.nifCin || "—"}</td>
+          <td>${m.ville || "—"} (${m.departement || "—"})</td>
+          <td>${m.adresse || "—"}</td>
+          <td style="text-align: center;">
+            <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; ${
+              m.statut === "actif"
+                ? "background: #dcfce7; color: #166534;"
+                : "background: #fef3c7; color: #92400e;"
+            }">
+              ${m.statut === "actif" ? "Actif" : "En attente"}
+            </span>
+          </td>
+        </tr>
+      `
+      )
+      .join("");
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Liste des Mandataires - ${currentPartyName}</title>
+        <meta charset="utf-8" />
+        <style>
+          @page {
+            size: A4 landscape;
+            margin: 10mm;
+          }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            color: #0f172a;
+            margin: 0;
+            padding: 20px;
+          }
+          .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            border-bottom: 2px solid #000B58;
+            padding-bottom: 12px;
+            margin-bottom: 16px;
+          }
+          .title {
+            font-size: 20px;
+            font-weight: 800;
+            color: #000B58;
+            margin: 0;
+            letter-spacing: -0.5px;
+          }
+          .subtitle {
+            font-size: 12px;
+            color: #475569;
+            margin-top: 4px;
+            font-weight: 500;
+          }
+          .meta {
+            text-align: right;
+            font-size: 11px;
+            color: #64748b;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+          }
+          th {
+            background-color: #f8fafc;
+            color: #1e293b;
+            font-weight: 700;
+            text-align: left;
+            padding: 8px 8px;
+            border-top: 1px solid #cbd5e1;
+            border-bottom: 1px solid #cbd5e1;
+          }
+          td {
+            padding: 8px 8px;
+            border-bottom: 1px solid #e2e8f0;
+            vertical-align: middle;
+          }
+          tr:nth-child(even) {
+            background-color: #fbfcfe;
+          }
+          .footer {
+            margin-top: 24px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #94a3b8;
+            border-top: 1px solid #e2e8f0;
+            padding-top: 8px;
+          }
+          @media print {
+            body { padding: 0; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <h1 class="title">RÉPERTOIRE OFFICIEL DES MANDATAIRES</h1>
+            <div class="subtitle">${currentPartyName} • Total : ${filteredMandataires.length} mandataire(s)</div>
+          </div>
+          <div class="meta">
+            <div>Document officiel généré le <strong>${dateStr}</strong></div>
+            <div>Centre de Tabulation Électoral</div>
+          </div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 25px; text-align: center;">N°</th>
+              <th>Nom & Prénom</th>
+              <th>Bureau assigné</th>
+              <th>Téléphone</th>
+              <th>NIF / CIN</th>
+              <th>Département & Ville</th>
+              <th>Adresse</th>
+              <th style="width: 80px; text-align: center;">Statut</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+
+        <div class="footer">
+          <div>Document certifié conforme • ${currentPartyName}</div>
+          <div>Page 1 / 1</div>
+        </div>
+
+        <script>
+          window.onload = function() {
+            window.print();
+          };
+        </script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
   };
 
   const filteredMandataires = useMemo(() => {
@@ -311,22 +671,71 @@ export default function MandatairesView({
   }, [mandataires, searchQuery, filterDepartement]);
 
   return (
-    <div className="w-full space-y-6">
-      {/* 1. EN-TÊTE ÉPURÉ */}
-      <div className="pb-3 border-b border-slate-200">
-        <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-          Mandataires
-        </h1>
+    <div className="w-full space-y-6 relative">
+      {/* ALERTE ÉMERGEANT DU HAUT EN ROUGE SI MANDATAIRE DÉJÀ SÉLECTIONNÉ */}
+      {topAlertMessage && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 animate-slide-down-alert flex items-center justify-between gap-4 px-6 py-4 bg-white border-2 border-red-500 text-red-600 rounded-2xl shadow-2xl max-w-lg w-[92%] sm:w-auto">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0 bg-transparent" />
+            <span className="font-bold text-sm tracking-tight text-red-600">
+              {topAlertMessage}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTopAlertMessage(null)}
+            className="text-red-400 hover:text-red-700 bg-transparent p-1 transition-colors cursor-pointer"
+            title="Fermer"
+          >
+            <X className="w-4 h-4 bg-transparent" />
+          </button>
+        </div>
+      )}
+
+      {/* 1. EN-TÊTE AVEC BOUTON ENREGISTRER EN VERT EN HAUT À DROITE */}
+      <div className="pb-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">
+            Mandataires
+          </h1>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowForm((prev) => !prev)}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 transition-all shadow-xs cursor-pointer shrink-0"
+        >
+          {showForm ? (
+            <>
+              <X className="w-4 h-4 text-white" />
+              <span>Fermer le formulaire</span>
+            </>
+          ) : (
+            <>
+              <Plus className="w-4 h-4 text-white" />
+              <span>Enregistrer un mandataire</span>
+            </>
+          )}
+        </button>
       </div>
 
-      {/* 2. FORMULAIRE PLEINE LARGEUR ÉPURÉ - IDENTIQUE AUX MEMBRES */}
-      <div className="w-full bg-white border border-slate-200 rounded-2xl shadow-xs p-6">
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {errorMessage && (
-            <div className="text-xs text-red-600 font-medium">
-              {errorMessage}
-            </div>
-          )}
+      {/* Message de succès global (visible même si le formulaire est fermé) */}
+      {successMessage && (
+        <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold rounded-xl">
+          <span>{successMessage}</span>
+        </div>
+      )}
+
+      {/* 2. FORMULAIRE AFFICHÉ LORS DU CLIC SUR LE BOUTON VERT */}
+      {showForm && (
+        <div className="w-full bg-white border border-slate-200 rounded-2xl shadow-xs p-6 animate-in fade-in duration-200">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {errorMessage && (
+              <div className="p-3.5 bg-red-50 border border-red-200 text-red-600 text-xs font-bold rounded-xl flex items-center gap-2.5">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 bg-transparent" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
 
           {successMessage && (
             <div className="text-xs text-emerald-600 font-medium">
@@ -406,7 +815,7 @@ export default function MandatairesView({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="mandataire@domaine.com"
-                className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all font-mono"
+                className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all"
               />
             </div>
           </div>
@@ -501,10 +910,10 @@ export default function MandatairesView({
             </div>
           </div>
 
-          {/* Grille des encadrés : Ligne 3 (NIF/CIN & Adresse de résidence) */}
-          <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-5">
+          {/* Grille des encadrés : Ligne 3 (NIF/CIN, Adresse & Mot de passe) */}
+          <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-5 items-end">
             {/* 9. NIF / CIN */}
-            <div className="lg:col-span-4 space-y-1.5">
+            <div className="lg:col-span-3 space-y-1.5">
               <label className="text-xs font-semibold text-slate-900 block">
                 NIF / CIN
               </label>
@@ -513,12 +922,12 @@ export default function MandatairesView({
                 value={nifCin}
                 onChange={(e) => setNifCin(e.target.value)}
                 placeholder="NIF ou CIN"
-                className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all font-mono"
+                className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all"
               />
             </div>
 
             {/* 10. Adresse de résidence */}
-            <div className="lg:col-span-8 space-y-1.5">
+            <div className="lg:col-span-5 space-y-1.5">
               <label className="text-xs font-semibold text-slate-900 block">
                 Adresse de résidence
               </label>
@@ -529,6 +938,43 @@ export default function MandatairesView({
                 placeholder="Adresse complète"
                 className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all"
               />
+            </div>
+
+            {/* 11. Mot de passe d'accès */}
+            <div className="lg:col-span-4 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-900 block">
+                  Mot de passe d'accès <span className="text-red-500">*</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setPassword(generateRandomPassword())}
+                  className="text-[10px] font-mono text-[#000B58] hover:underline cursor-pointer flex items-center gap-1"
+                  title="Générer un nouveau mot de passe sécurisé"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Générer
+                </button>
+              </div>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type={showPassword ? "text" : "password"}
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Défaut: Mandataire2026$"
+                  className="w-full pl-9 pr-9 py-2.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#000B58]/20 focus:border-[#000B58] transition-all font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  title={showPassword ? "Masquer" : "Afficher"}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -550,6 +996,7 @@ export default function MandatairesView({
                   setAdresse("");
                   setNifCin("");
                   setVille("");
+                  setPassword(generateRandomPassword());
                   setErrorMessage(null);
                 }}
                 className="px-4 py-2 text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
@@ -559,9 +1006,16 @@ export default function MandatairesView({
             )}
 
             <button
+              type="button"
+              onClick={() => setShowForm(false)}
+              className="px-4 py-2 text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            >
+              Fermer
+            </button>
+
+            <button
               type="submit"
-              className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs font-semibold text-white transition-all cursor-pointer hover:opacity-95 active:scale-95 shadow-sm"
-              style={{ backgroundColor: "#000B58" }}
+              className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 transition-all cursor-pointer hover:opacity-95 active:scale-95 shadow-sm"
             >
               <Plus className="w-4 h-4" />
               <span>Enregistrer le mandataire</span>
@@ -569,11 +1023,12 @@ export default function MandatairesView({
           </div>
         </form>
       </div>
+      )}
 
       {/* 3. TABLEAU DES MANDATAIRES */}
       <div className="w-full bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-        {/* Barre de filtres */}
-        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        {/* Barre de filtres et boutons d'export */}
+        <div className="p-4 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-1">
             <div className="relative flex-1 max-w-md">
               <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -581,7 +1036,7 @@ export default function MandatairesView({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Rechercher par nom, bureau, téléphone, NIF/CIN..."
+                placeholder="Rechercher un mandataire..."
                 className="w-full pl-10 pr-4 py-2 text-xs bg-white border border-slate-200 rounded-xl text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#000B58]"
               />
             </div>
@@ -600,8 +1055,27 @@ export default function MandatairesView({
             </select>
           </div>
 
-          <div className="text-xs font-mono text-slate-500">
-            Affichage : <strong className="text-slate-800">{filteredMandataires.length}</strong> sur {mandataires.length} mandataire(s)
+          {/* Boutons d'exportation PDF (Rouge) et Excel (Vert solide) */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleExportPDF}
+              title="Exporter au format PDF"
+              className="px-3.5 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 active:scale-95 rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <FileText className="w-4 h-4 text-white" />
+              <span>Export PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              title="Exporter sous format Excel"
+              className="px-3.5 py-2 text-xs font-bold text-white bg-[#107c41] hover:bg-[#0e6b37] active:scale-95 rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-white" />
+              <span>Export Excel</span>
+            </button>
           </div>
         </div>
 
@@ -609,7 +1083,7 @@ export default function MandatairesView({
         <div className="w-full overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
-              <tr className="border-b border-slate-200 text-slate-400 uppercase tracking-wider font-mono text-[10px]">
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 text-xs">
                 <th className="py-3 px-4 font-semibold">Photo</th>
                 <th className="py-3 px-4 font-semibold">Nom & Prénom</th>
                 <th className="py-3 px-4 font-semibold">Bureau assigné</th>
@@ -633,7 +1107,7 @@ export default function MandatairesView({
                           className="w-8 h-8 rounded-full object-cover border border-slate-200"
                         />
                       ) : (
-                        <div className="w-8 h-8 rounded-full border border-slate-300 bg-slate-100 flex items-center justify-center font-bold text-[10px] text-slate-700 font-mono">
+                        <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs">
                           {m.prenom?.[0] || ""}{m.nom?.[0] || ""}
                         </div>
                       )}
@@ -641,16 +1115,16 @@ export default function MandatairesView({
                     <td className="py-3 px-4 font-bold text-slate-900">
                       <div>{m.prenom} {m.nom}</div>
                       {m.email && (
-                        <div className="text-[11px] font-mono text-slate-500 font-normal">{m.email}</div>
+                        <div className="text-[11px] text-slate-500 font-normal">{m.email}</div>
                       )}
                     </td>
                     <td className="py-3 px-4 font-medium text-slate-800">
                       {m.bureauAssigne}
                     </td>
-                    <td className="py-3 px-4 font-mono text-slate-700">
+                    <td className="py-3 px-4 text-slate-700">
                       {m.telephone || "—"}
                     </td>
-                    <td className="py-3 px-4 font-mono text-slate-700 text-[11px]">
+                    <td className="py-3 px-4 text-slate-700 text-[11px]">
                       {m.nifCin || "—"}
                     </td>
                     <td className="py-3 px-4">
@@ -661,31 +1135,29 @@ export default function MandatairesView({
                     </td>
                     <td className="py-3 px-4">
                       {m.statut === "actif" ? (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10.5px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                          <span>Actif</span>
+                        <span className="inline-block px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-800">
+                          Actif
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10.5px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-                          <Clock className="w-3 h-3 text-amber-600" />
-                          <span>En attente</span>
+                        <span className="inline-block px-2.5 py-1 rounded-md text-xs font-semibold bg-amber-100 text-amber-800">
+                          En attente
                         </span>
                       )}
                     </td>
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1">
-                        {m.statut === "en_attente" && (
+                        {m.email && (
                           <button
                             type="button"
                             onClick={() => handleResendActivation(m)}
                             disabled={resendingId === m.id}
-                            title="Renvoyer l'e-mail d'activation"
+                            title="Renvoyer les identifiants de connexion"
                             className="p-1.5 rounded-lg text-slate-500 hover:text-[#000B58] hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
                           >
                             {resendingId === m.id ? (
-                              <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#000B58]" />
+                              <RefreshCw className="w-4 h-4 animate-spin text-[#000B58]" />
                             ) : (
-                              <Send className="w-3.5 h-3.5 text-blue-600" />
+                              <Mail className="w-4 h-4 text-slate-500 hover:text-[#000B58]" />
                             )}
                           </button>
                         )}
@@ -705,7 +1177,7 @@ export default function MandatairesView({
                 <tr>
                   <td colSpan={9} className="py-12 text-center text-slate-400">
                     <p className="text-xs text-slate-500">
-                      Aucun mandataire enregistré pour le moment (0).
+                      Aucun mandataire trouvé.
                     </p>
                   </td>
                 </tr>

@@ -32,7 +32,7 @@ export default function AccessManagementView({
   membresList = [],
   onUpdateMembre,
   onUpdateAllMembres,
-  tenantName = "Parti Démocratique Uni",
+  tenantName = "Parti Octacore",
 }: AccessManagementViewProps) {
   // Sélection du membre pour l'attribution d'accès
   const [selectedMembreId, setSelectedMembreId] = useState<string>("");

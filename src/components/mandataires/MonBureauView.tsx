@@ -3,6 +3,7 @@
 import React from "react";
 import { Building, Users, MapPin, ShieldCheck, ArrowRight, FileText, BarChart3, Clock } from "lucide-react";
 import { CurrentUser } from "@/types/auth";
+import { CollecteIcon } from "@/components/layout/CustomIcons";
 
 interface MonBureauViewProps {
   currentUser: CurrentUser;
@@ -25,7 +26,7 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-lg font-medium flex items-center gap-1.5">
+          <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-lg font-medium flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             Surveillance active
           </span>
@@ -53,7 +54,7 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
                   {commune}, Dépt. {departement}
                 </span>
                 <span className="text-slate-300">•</span>
-                <span className="font-mono text-slate-500">
+                <span className="text-slate-500">
                   Norme officielle 350 électeurs
                 </span>
               </div>
@@ -64,34 +65,34 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
         {/* Grille d'informations de surveillance */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
-            <span className="text-[11px] font-mono text-slate-500 uppercase tracking-wider block">
+            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
               Capacité maximale
             </span>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold text-slate-900 font-mono">350</span>
+              <span className="text-2xl font-bold text-slate-900">350</span>
               <span className="text-xs text-slate-500">électeurs inscrits</span>
             </div>
           </div>
 
           <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
-            <span className="text-[11px] font-mono text-slate-500 uppercase tracking-wider block">
+            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
               Mandataire accrédité
             </span>
             <div className="mt-2">
               <div className="text-sm font-bold text-slate-900 truncate">
                 {currentUser.prenom} {currentUser.nom}
               </div>
-              <div className="text-xs text-slate-500 font-mono mt-0.5">
+              <div className="text-xs text-slate-500 mt-0.5">
                 {currentUser.telephone || "Accréditation validée"}
               </div>
             </div>
           </div>
 
           <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
-            <span className="text-[11px] font-mono text-slate-500 uppercase tracking-wider block">
+            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
               Horodatage scrutin
             </span>
-            <div className="mt-2 flex items-center gap-2 text-xs text-slate-700 font-mono">
+            <div className="mt-2 flex items-center gap-2 text-xs text-slate-700">
               <Clock className="w-4 h-4 text-slate-400" />
               <span>Dépouillement & Clôture</span>
             </div>
@@ -106,8 +107,8 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg bg-blue-50 text-[#000B58] flex items-center justify-center">
-                  <BarChart3 className="w-5 h-5" />
+                <div className="shrink-0 flex items-center justify-center">
+                  <CollecteIcon size={26} className="text-[#000B58] group-hover:scale-105 transition-transform" />
                 </div>
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 group-hover:text-[#000B58]">
@@ -128,11 +129,11 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center">
-                  <FileText className="w-5 h-5" />
+                <div className="shrink-0 flex items-center justify-center">
+                  <FileText size={26} className="text-[#000B58] group-hover:scale-105 transition-transform" />
                 </div>
                 <div>
-                  <h3 className="text-xs font-bold text-slate-900 group-hover:text-emerald-700">
+                  <h3 className="text-xs font-bold text-slate-900 group-hover:text-[#000B58]">
                     Transmettre le Procès-Verbal (PV)
                   </h3>
                   <p className="text-[11px] text-slate-500">
@@ -140,7 +141,7 @@ export default function MonBureauView({ currentUser, onNavigate }: MonBureauView
                   </p>
                 </div>
               </div>
-              <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-700" />
+              <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-[#000B58]" />
             </div>
           </button>
         </div>

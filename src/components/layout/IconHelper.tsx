@@ -30,7 +30,7 @@ import {
   KeyRound,
   LucideProps,
 } from "lucide-react";
-import { CollecteIcon, BureauxIcon } from "./CustomIcons";
+import { CollecteIcon, BureauxIcon, PushpinIcon } from "./CustomIcons";
 
 interface IconRendererProps extends LucideProps {
   name: string;
@@ -38,6 +38,10 @@ interface IconRendererProps extends LucideProps {
 
 export function IconRenderer({ name, ...props }: IconRendererProps) {
   switch (name) {
+    case "Pushpin":
+    case "Guide":
+    case "Pin":
+      return <PushpinIcon className={props.className} size={props.size} strokeWidth={props.strokeWidth} />;
     case "Dashboard":
     case "LayoutDashboard":
       return <LayoutDashboard {...props} />;

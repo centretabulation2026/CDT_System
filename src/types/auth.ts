@@ -9,6 +9,7 @@ export interface CurrentUser {
   roleTitle: string;
   tenantId?: string;
   tenantName?: string;
+  tenantLogoUrl?: string;
   bureauAssigne?: string;
   telephone?: string;
   nifCin?: string;
@@ -29,4 +30,5 @@ export interface PartyTenant {
   licenceType: string;
   dateCreation: string;
   dateActivation?: string;
+  logoUrl?: string;
 }

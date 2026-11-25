@@ -18,6 +18,8 @@ import {
   Check,
 } from "lucide-react";
 import { PartyTenant } from "@/types/auth";
+import { fetchPartiesFromSupabase, savePartyToSupabase } from "@/lib/supabaseService";
+import { isSupabaseConfigured } from "@/lib/supabase";
 
 interface SuperAdminDashboardViewProps {
   onLogout?: () => void;
@@ -55,6 +57,11 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
     id?: string;
   } | null>(null);
   const [resendingPartyId, setResendingPartyId] = useState<string | null>(null);
+  const [rowFeedback, setRowFeedback] = useState<{
+    partyId: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   // Vérifier la configuration du service d'e-mail au chargement
   useEffect(() => {
@@ -72,23 +79,41 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
       });
   }, []);
 
-  // Chargement des partis depuis localStorage
+  // Chargement des partis depuis Supabase (avec fallback localStorage)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("cdt_parties");
-      if (stored) {
-        setParties(JSON.parse(stored));
-      } else {
+    async function initParties() {
+      if (isSupabaseConfigured) {
+        try {
+          const supaParties = await fetchPartiesFromSupabase();
+          if (supaParties.length > 0) {
+            setParties(supaParties);
+            localStorage.setItem("cdt_parties", JSON.stringify(supaParties));
+            setIsLoaded(true);
+            return;
+          }
+        } catch (e) {
+          console.error("Erreur lecture partis Supabase:", e);
+        }
+      }
+
+      try {
+        const stored = localStorage.getItem("cdt_parties");
+        if (stored) {
+          setParties(JSON.parse(stored));
+        } else {
+          setParties([]);
+        }
+      } catch (e) {
+        console.error("Erreur chargement partis localStorage:", e);
         setParties([]);
       }
-    } catch (e) {
-      console.error("Erreur chargement partis:", e);
-      setParties([]);
+      setIsLoaded(true);
     }
-    setIsLoaded(true);
+
+    initParties();
   }, []);
 
-  // Sauvegarde dans localStorage
+  // Sauvegarde dans Supabase et localStorage
   const saveParties = (newParties: PartyTenant[]) => {
     setParties(newParties);
     try {
@@ -128,18 +153,22 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
       const result = await response.json();
 
       if (result.success) {
+        const msg = `E-mail d'activation délivré automatiquement à ${party.email} via ${
+          result.provider === "gmail_smtp" ? "centretabulation@gmail.com" : "Resend"
+        }.`;
         setEmailDeliveryStatus({
           success: true,
-          message: `E-mail d'activation délivré automatiquement à ${party.email} via ${
-            result.provider === "gmail_smtp" ? "centretabulation@gmail.com" : "Resend"
-          }.`,
+          message: msg,
           id: result.id,
         });
+        return { success: true, message: msg };
       } else {
-        let displayError = result.error || "Impossible d'envoyer l'e-mail via Resend.";
-        if (displayError.includes("You can only send testing emails to your own email address")) {
+        let displayError = result.error || "Impossible d'envoyer l'e-mail.";
+        if (displayError.includes("535-5.7.8") || displayError.includes("BadCredentials")) {
+          displayError = "Authentification Gmail refusée (BadCredentials) : Le mot de passe d'application pour centretabulation@gmail.com est expiré ou le compte associé diffère. Mettez à jour SMTP_PASS dans .env.local avec un mot de passe d'application valide (myaccount.google.com/apppasswords), puis cliquez sur « Renvoyer mail ».";
+        } else if (displayError.includes("You can only send testing emails to your own email address")) {
           const matchedEmail = displayError.match(/\(([^)]+)\)/)?.[1] || "worksysmanagement@gmail.com";
-          displayError = `Mode Test Resend actif : envoi d'e-mail automatique réservé à votre adresse de test (${matchedEmail}). Pour envoyer à d'autres adresses (ex: @esih.edu), un domaine vérifié sur resend.com est requis. Vous pouvez tester directement en cliquant sur « Tester le lien client » ou « Copier le lien ».`;
+          displayError = `Mode Test Resend actif : envoi d'e-mail automatique réservé à votre adresse de test (${matchedEmail}). Pour envoyer à d'autres adresses, configurez le mot de passe d'application Gmail dans .env.local. Vous pouvez tester directement en cliquant sur « Tester le lien client » ou « Copier le lien ».`;
         }
 
         setEmailDeliveryStatus({
@@ -148,12 +177,15 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
             ? "Clé RESEND_API_KEY non configurée dans .env.local (Ajoutez votre clé pour activer l'envoi réel)."
             : displayError,
         });
+        return { success: false, message: displayError };
       }
     } catch (err: any) {
+      const errMsg = `Erreur réseau lors de l'appel d'envoi : ${err.message}`;
       setEmailDeliveryStatus({
         success: false,
-        message: `Erreur réseau lors de l'appel à Resend : ${err.message}`,
+        message: errMsg,
       });
+      return { success: false, message: errMsg };
     } finally {
       setIsSendingEmail(false);
     }
@@ -200,6 +232,7 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
 
     const updated = [newParty, ...parties];
     saveParties(updated);
+    await savePartyToSupabase(newParty);
 
     setCreatedPartyToken(uniqueToken);
     setCreatedPartyEmail(cleanEmail);
@@ -219,7 +252,16 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
   // Renvoyer l'email d'invitation manuellement pour un parti en attente
   const handleManualResend = async (party: PartyTenant) => {
     setResendingPartyId(party.id);
-    await triggerResendEmail(party, party.activationToken);
+    setRowFeedback(null);
+    setCreatedPartyToken(party.activationToken);
+    setCreatedPartyEmail(party.email);
+
+    const res = await triggerResendEmail(party, party.activationToken);
+    setRowFeedback({
+      partyId: party.id,
+      success: res.success,
+      message: res.message,
+    });
     setResendingPartyId(null);
   };
 
@@ -349,31 +391,44 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 text-emerald-900 font-bold text-sm">
                 <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                <span>Parti enregistré avec succès pour {createdPartyEmail}</span>
+                <span>Lien d'activation sécurisé pour {createdPartyEmail}</span>
               </div>
 
-              {/* Statut d'envoi automatique Resend */}
-              {isSendingEmail ? (
-                <div className="flex items-center gap-2 text-xs font-mono text-blue-800 bg-blue-100/80 px-3 py-1 rounded-full border border-blue-300">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                  <span>Transfert automatique de l'e-mail via Resend en cours...</span>
-                </div>
-              ) : emailDeliveryStatus ? (
-                <div
-                  className={`flex items-center gap-2 text-xs font-mono px-3 py-1 rounded-full border ${
-                    emailDeliveryStatus.success
-                      ? "text-emerald-800 bg-emerald-100 border-emerald-300 font-semibold"
-                      : "text-amber-800 bg-amber-100 border-amber-300 font-medium"
-                  }`}
+              <div className="flex items-center gap-2">
+                {/* Statut d'envoi automatique */}
+                {isSendingEmail ? (
+                  <div className="flex items-center gap-2 text-xs font-mono text-blue-800 bg-blue-100/80 px-3 py-1 rounded-full border border-blue-300">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                    <span>Envoi de l'e-mail en cours...</span>
+                  </div>
+                ) : emailDeliveryStatus ? (
+                  <div
+                    className={`flex items-center gap-2 text-xs font-mono px-3 py-1 rounded-full border ${
+                      emailDeliveryStatus.success
+                        ? "text-emerald-800 bg-emerald-100 border-emerald-300 font-semibold"
+                        : "text-amber-800 bg-amber-100 border-amber-300 font-medium"
+                    }`}
+                  >
+                    <Mail className="w-3.5 h-3.5" />
+                    <span>{emailDeliveryStatus.message}</span>
+                  </div>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={() => setCreatedPartyToken(null)}
+                  className="text-emerald-700 hover:text-emerald-950 p-1 text-sm font-bold ml-1 cursor-pointer"
+                  title="Fermer ce volet"
                 >
-                  <Mail className="w-3.5 h-3.5" />
-                  <span>{emailDeliveryStatus.message}</span>
-                </div>
-              ) : null}
+                  ✕
+                </button>
+              </div>
             </div>
 
             <p className="text-xs text-emerald-800">
-              Un e-mail officiel contenant le lien sécurisé a été transmis au dirigeant du parti. Vous pouvez également copier le lien ci-dessous ou le tester :
+              {emailDeliveryStatus?.success
+                ? "Un e-mail officiel contenant le lien sécurisé a été transmis au dirigeant du parti. Vous pouvez également copier le lien ci-dessous ou le tester :"
+                : "Vous pouvez copier le lien d'activation sécurisé ci-dessous ou le tester directement pour finaliser l'accès du dirigeant :"}
             </p>
 
             <div className="flex flex-col sm:flex-row items-center gap-2">
@@ -584,29 +639,43 @@ export default function SuperAdminDashboardView({ onLogout }: SuperAdminDashboar
 
                       <td className="py-3 px-4">
                         {p.statut === "en_attente" ? (
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <button
-                              onClick={() => handleCopyLink(p.activationToken)}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-slate-200 hover:border-slate-400 rounded-lg bg-white text-slate-700 transition-colors cursor-pointer shadow-2xs"
-                              title="Copier le lien d'activation"
-                            >
-                              <Copy className="w-3 h-3 text-slate-500" />
-                              <span>Copier lien</span>
-                            </button>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <button
+                                onClick={() => handleCopyLink(p.activationToken)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-slate-200 hover:border-slate-400 rounded-lg bg-white text-slate-700 transition-colors cursor-pointer shadow-2xs"
+                                title="Copier le lien d'activation"
+                              >
+                                <Copy className="w-3 h-3 text-slate-500" />
+                                <span>{copiedToken && createdPartyToken === p.activationToken ? "Lien copié !" : "Copier lien"}</span>
+                              </button>
 
-                            <button
-                              onClick={() => handleManualResend(p)}
-                              disabled={resendingPartyId === p.id}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-blue-200 hover:border-[#000B58] bg-blue-50/60 hover:bg-blue-50 text-[#000B58] font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 shadow-2xs"
-                              title="Renvoyer l'e-mail officiel via Resend"
-                            >
-                              {resendingPartyId === p.id ? (
-                                <Loader2 className="w-3 h-3 animate-spin text-[#000B58]" />
-                              ) : (
-                                <Mail className="w-3 h-3 text-[#000B58]" />
-                              )}
-                              <span>Renvoyer mail</span>
-                            </button>
+                              <button
+                                onClick={() => handleManualResend(p)}
+                                disabled={resendingPartyId === p.id}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-blue-200 hover:border-[#000B58] bg-blue-50/60 hover:bg-blue-50 text-[#000B58] font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 shadow-2xs"
+                                title="Renvoyer l'e-mail officiel d'activation"
+                              >
+                                {resendingPartyId === p.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin text-[#000B58]" />
+                                ) : (
+                                  <Mail className="w-3 h-3 text-[#000B58]" />
+                                )}
+                                <span>{resendingPartyId === p.id ? "Envoi en cours..." : "Renvoyer mail"}</span>
+                              </button>
+                            </div>
+
+                            {rowFeedback && rowFeedback.partyId === p.id && (
+                              <div
+                                className={`text-[11px] font-medium p-2 rounded-lg border leading-tight animate-fade-in ${
+                                  rowFeedback.success
+                                    ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                                    : "bg-amber-50 text-amber-900 border-amber-300"
+                                }`}
+                              >
+                                {rowFeedback.message}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <span className="text-[11px] font-mono text-slate-400">Activé le {p.dateActivation || p.dateCreation}</span>

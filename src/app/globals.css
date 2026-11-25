@@ -51,3 +51,30 @@ nav {
   scrollbar-width: none !important;
   -ms-overflow-style: none !important;
 }
+
+/* Suppression définitive des flèches (spinners/steppers) sur les champs numériques */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Animation d'alerte surgissant du haut */
+@keyframes slideDownAlert {
+  0% {
+    transform: translate(-50%, -120%);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-down-alert {
+  animation: slideDownAlert 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

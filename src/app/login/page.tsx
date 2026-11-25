@@ -5,19 +5,19 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, ShieldCheck, Eye, EyeOff, AlertCircle } from "lucide-react";
 import { CurrentUser, PartyTenant } from "@/types/auth";
 import { SystemLogoIcon } from "@/components/layout/CustomIcons";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 export default function LoginPage() {
   const router = useRouter();
 
-  // Par défaut, pré-rempli avec les identifiants SuperAdmin pour faciliter les tests
-  const [email, setEmail] = useState("pitonrodjy@gmail.com");
-  const [password, setPassword] = useState("Pitonrp8$");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginSuccess, setLoginSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -54,138 +54,319 @@ export default function LoginPage() {
         return;
       }
     } else {
-      // 2. Recherche dans les partis politiques créés via le SuperAdmin
-      try {
-        const storedParties = localStorage.getItem("cdt_parties");
-        const parties: PartyTenant[] = storedParties ? JSON.parse(storedParties) : [];
+      // 2. Recherche dans les partis (Supabase en priorité, puis localStorage)
+      let matchingParty: any = null;
+      if (isSupabaseConfigured) {
+        try {
+          const { data, error } = await supabase
+            .from("parties")
+            .select("*")
+            .ilike("email", cleanEmail)
+            .maybeSingle();
 
-        const matchingParty = parties.find((p) => p.email.toLowerCase() === cleanEmail);
+          if (data && !error) {
+            matchingParty = {
+              id: data.id,
+              nom: data.nom,
+              sigle: data.sigle,
+              dirigeantNom: data.dirigeant_nom,
+              dirigeantPrenom: data.dirigeant_prenom,
+              email: data.email,
+              statut: data.statut,
+              password: data.password,
+            };
+          }
+        } catch (err) {
+          console.error("Erreur lecture partis Supabase:", err);
+        }
+      }
 
-        if (matchingParty) {
-          if (matchingParty.statut === "en_attente") {
+      if (!matchingParty) {
+        try {
+          const storedParties = localStorage.getItem("cdt_parties");
+          const parties: PartyTenant[] = storedParties ? JSON.parse(storedParties) : [];
+          matchingParty = parties.find((p) => p.email.toLowerCase() === cleanEmail) || null;
+        } catch (err) {
+          console.error("Erreur lecture partis localStorage:", err);
+        }
+      }
+
+      if (matchingParty) {
+        if (matchingParty.statut === "en_attente") {
+          setIsLoading(false);
+          setErrorMessage(
+            "Ce compte n'a pas encore été activé. Veuillez utiliser le lien d'invitation sécurisé pour définir votre mot de passe."
+          );
+          return;
+        }
+
+        if (matchingParty.password === cleanPassword) {
+          let partyLogo: string | undefined = matchingParty.logoUrl;
+          if (!partyLogo) {
+            try {
+              partyLogo =
+                localStorage.getItem(`cdt_party_logo_${matchingParty.nom}`) ||
+                localStorage.getItem("cdt_party_logo_Parti Octacore") ||
+                localStorage.getItem("cdt_current_party_logo") ||
+                undefined;
+            } catch (e) {}
+          }
+          if (!partyLogo) {
+            try {
+              const res = await fetch(`/api/party-logo?partyName=${encodeURIComponent(matchingParty.nom || "Parti Octacore")}`);
+              if (res.ok) {
+                const data = await res.json();
+                if (data?.logoUrl) partyLogo = data.logoUrl;
+              }
+            } catch (e) {}
+          }
+
+          loggedUser = {
+            id: `usr-party-${matchingParty.id}`,
+            nom: matchingParty.dirigeantNom,
+            prenom: matchingParty.dirigeantPrenom,
+            email: matchingParty.email,
+            userType: "membre",
+            roleTitle: "PDG du Parti",
+            tenantId: matchingParty.id,
+            tenantName: matchingParty.nom,
+            tenantLogoUrl: partyLogo,
+            telephone: "+509 3712-4589",
+            departement: "Ouest",
+            commune: "Port-au-Prince",
+          };
+        } else {
+          setIsLoading(false);
+          setErrorMessage("Mot de passe incorrect.");
+          return;
+        }
+      }
+
+      // 3. Recherche dans les mandataires de terrain (Supabase en priorité, puis localStorage)
+      if (!loggedUser) {
+        let matchingMandataire: any = null;
+        if (isSupabaseConfigured) {
+          try {
+            const { data, error } = await supabase
+              .from("mandataires")
+              .select("*, parties:party_id (id, nom, sigle)")
+              .ilike("email", cleanEmail)
+              .maybeSingle();
+
+            if (data && !error) {
+              matchingMandataire = {
+                id: data.id,
+                nom: data.nom,
+                prenom: data.prenom,
+                email: data.email,
+                bureauAssigne: data.bureau_assigne,
+                telephone: data.telephone,
+                ville: data.ville,
+                departement: data.departement,
+                statut: data.statut,
+                password: data.password,
+                partyId: data.party_id,
+                tenantName: data.parties?.nom,
+              };
+            }
+          } catch (err) {
+            console.error("Erreur lecture mandataires Supabase:", err);
+          }
+        }
+
+        if (!matchingMandataire) {
+          try {
+            const storedMandataires = localStorage.getItem("cdt_mandataires");
+            if (storedMandataires) {
+              const mandataires = JSON.parse(storedMandataires);
+              matchingMandataire =
+                mandataires.find(
+                  (m: any) => m.email && m.email.toLowerCase() === cleanEmail
+                ) || null;
+            }
+          } catch (err) {
+            console.error("Erreur lecture mandataires localStorage:", err);
+          }
+        }
+
+        if (matchingMandataire) {
+          // Vérification du statut d'activation
+          if (matchingMandataire.statut === "en_attente") {
             setIsLoading(false);
             setErrorMessage(
-              "Ce compte n'a pas encore été activé. Veuillez utiliser le lien d'invitation sécurisé pour définir votre mot de passe."
+              "Ce compte mandataire n'a pas encore été activé. Veuillez cliquer sur le lien reçu par e-mail pour définir votre mot de passe sécurisé."
             );
             return;
           }
 
-          if (matchingParty.password === cleanPassword) {
+          const expectedPassword = matchingMandataire.password || "Mandataire2026$";
+          if (cleanPassword === expectedPassword) {
+            // Déterminer dynamiquement le parti politique du mandataire (ex: Parti Octacore)
+            let partyName = matchingMandataire.tenantName || "";
+            let partyId = matchingMandataire.partyId || matchingMandataire.party_id || "";
+
+            if (!partyName && isSupabaseConfigured) {
+              try {
+                if (partyId) {
+                  const { data: p } = await supabase
+                    .from("parties")
+                    .select("nom")
+                    .eq("id", partyId)
+                    .maybeSingle();
+                  if (p?.nom) partyName = p.nom;
+                } else {
+                  const { data: p } = await supabase
+                    .from("parties")
+                    .select("id, nom")
+                    .order("created_at", { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
+                  if (p?.nom) {
+                    partyName = p.nom;
+                    partyId = p.id;
+                  }
+                }
+              } catch (e) {}
+            }
+
+            if (!partyName) {
+              try {
+                const storedParties = localStorage.getItem("cdt_parties");
+                if (storedParties) {
+                  const pList = JSON.parse(storedParties);
+                  if (pList && pList.length > 0) {
+                    partyName = pList[0].nom;
+                    partyId = pList[0].id;
+                  }
+                }
+              } catch (e) {}
+            }
+
+            let mandataireLogo: string | undefined = undefined;
+            try {
+              mandataireLogo =
+                localStorage.getItem(`cdt_party_logo_${partyName}`) ||
+                localStorage.getItem("cdt_party_logo_Parti Octacore") ||
+                localStorage.getItem("cdt_current_party_logo") ||
+                undefined;
+            } catch (e) {}
+
+            if (!mandataireLogo) {
+              try {
+                const res = await fetch(`/api/party-logo?partyName=${encodeURIComponent(partyName || "Parti Octacore")}`);
+                if (res.ok) {
+                  const data = await res.json();
+                  if (data?.logoUrl) {
+                    mandataireLogo = data.logoUrl;
+                    localStorage.setItem(`cdt_party_logo_${partyName || "Parti Octacore"}`, data.logoUrl);
+                    localStorage.setItem("cdt_party_logo_Parti Octacore", data.logoUrl);
+                    localStorage.setItem("cdt_current_party_logo", data.logoUrl);
+                  }
+                }
+              } catch (e) {}
+            }
+
             loggedUser = {
-              id: `usr-party-${matchingParty.id}`,
-              nom: matchingParty.dirigeantNom,
-              prenom: matchingParty.dirigeantPrenom,
-              email: matchingParty.email,
-              userType: "membre",
-              roleTitle: "PDG du Parti",
-              tenantId: matchingParty.id,
-              tenantName: matchingParty.nom,
-              telephone: "+509 3712-4589",
-              departement: "Ouest",
-              commune: "Port-au-Prince",
+              id: matchingMandataire.id || `usr-mandataire-${Date.now()}`,
+              nom: matchingMandataire.nom || "Mandataire",
+              prenom: matchingMandataire.prenom || "Terrain",
+              email: cleanEmail,
+              userType: "mandataire",
+              roleTitle: "Mandataire de terrain",
+              tenantId: partyId || undefined,
+              tenantName: partyName || "Parti Octacore",
+              tenantLogoUrl: mandataireLogo,
+              bureauAssigne: matchingMandataire.bureauAssigne || "Non assigné",
+              telephone: matchingMandataire.telephone || "",
+              commune: matchingMandataire.ville || "Port-au-Prince",
+              departement: matchingMandataire.departement || "Ouest",
             };
           } else {
             setIsLoading(false);
-            setErrorMessage("Mot de passe incorrect.");
+            setErrorMessage("Mot de passe incorrect pour le compte mandataire.");
             return;
           }
         }
-      } catch (err) {
-        console.error("Erreur lecture partis:", err);
       }
 
-      // 3. Recherche dans les mandataires de terrain enregistrés
+      // 4. Recherche dans les membres du parti (Supabase en priorité, puis localStorage)
       if (!loggedUser) {
-        try {
-          const storedMandataires = localStorage.getItem("cdt_mandataires");
-          if (storedMandataires) {
-            const mandataires = JSON.parse(storedMandataires);
-            const matchingMandataire = mandataires.find(
-              (m: any) => m.email && m.email.toLowerCase() === cleanEmail
-            );
-            if (matchingMandataire) {
-              // Vérification du statut d'activation
-              if (matchingMandataire.statut === "en_attente") {
-                setIsLoading(false);
-                setErrorMessage(
-                  "Ce compte mandataire n'a pas encore été activé. Veuillez cliquer sur le lien reçu par e-mail pour définir votre mot de passe sécurisé."
-                );
-                return;
-              }
+        let matchingMembre: any = null;
+        if (isSupabaseConfigured) {
+          try {
+            const { data, error } = await supabase
+              .from("membres")
+              .select("*")
+              .ilike("email", cleanEmail)
+              .maybeSingle();
 
-              const expectedPassword = matchingMandataire.password || "Mandataire2026$";
-              if (cleanPassword === expectedPassword) {
-                loggedUser = {
-                  id: matchingMandataire.id || `usr-mandataire-${Date.now()}`,
-                  nom: matchingMandataire.nom || "Mandataire",
-                  prenom: matchingMandataire.prenom || "Terrain",
-                  email: cleanEmail,
-                  userType: "mandataire",
-                  roleTitle: "Mandataire de terrain",
-                  bureauAssigne: matchingMandataire.bureauAssigne || "Non assigné",
-                  telephone: matchingMandataire.telephone || "",
-                  commune: matchingMandataire.ville || "Port-au-Prince",
-                  departement: matchingMandataire.departement || "Ouest",
-                };
-              } else {
-                setIsLoading(false);
-                setErrorMessage("Mot de passe incorrect pour le compte mandataire.");
-                return;
-              }
+            if (data && !error) {
+              matchingMembre = {
+                id: data.id,
+                nom: data.nom,
+                prenom: data.prenom,
+                email: data.email,
+                role: data.role,
+                telephone: data.telephone,
+                ville: data.ville,
+                departement: data.departement,
+                statut: data.statut,
+                password: data.password,
+              };
             }
+          } catch (err) {
+            console.error("Erreur lecture membres Supabase:", err);
           }
-        } catch (err) {
-          console.error("Erreur lecture mandataires:", err);
         }
-      }
 
-      // 4. Recherche dans les membres du parti enregistrés
-      if (!loggedUser) {
-        try {
-          const storedMembres = localStorage.getItem("cdt_membres");
-          if (storedMembres) {
-            const membres = JSON.parse(storedMembres);
-            const matchingMembre = membres.find(
-              (m: any) => m.email && m.email.toLowerCase() === cleanEmail
-            );
-            if (matchingMembre) {
-              // Vérification si le compte a reçu des accès depuis Gestion des accès
-              if (!matchingMembre.password) {
-                setIsLoading(false);
-                setErrorMessage(
-                  "Ce membre n'a pas encore d'accès configuré. L'administrateur du parti doit lui attribuer ses accès dans l'onglet « Gestion des accès »."
-                );
-                return;
-              }
-
-              if (matchingMembre.statut === "inactif") {
-                setIsLoading(false);
-                setErrorMessage("Ce compte membre a été désactivé par l'administrateur du parti.");
-                return;
-              }
-
-              const expectedPassword = matchingMembre.password;
-              if (cleanPassword === expectedPassword) {
-                loggedUser = {
-                  id: matchingMembre.id || `usr-membre-${Date.now()}`,
-                  nom: matchingMembre.nom || "Membre",
-                  prenom: matchingMembre.prenom || "Parti",
-                  email: cleanEmail,
-                  userType: "membre",
-                  roleTitle: matchingMembre.role || "Membre du Parti",
-                  telephone: matchingMembre.telephone || "",
-                  commune: matchingMembre.ville || "Port-au-Prince",
-                  departement: matchingMembre.departement || "Ouest",
-                };
-              } else {
-                setIsLoading(false);
-                setErrorMessage("Mot de passe incorrect pour le compte membre.");
-                return;
-              }
+        if (!matchingMembre) {
+          try {
+            const storedMembres = localStorage.getItem("cdt_membres");
+            if (storedMembres) {
+              const membres = JSON.parse(storedMembres);
+              matchingMembre =
+                membres.find(
+                  (m: any) => m.email && m.email.toLowerCase() === cleanEmail
+                ) || null;
             }
+          } catch (err) {
+            console.error("Erreur lecture membres localStorage:", err);
           }
-        } catch (err) {
-          console.error("Erreur lecture membres:", err);
+        }
+
+        if (matchingMembre) {
+          if (!matchingMembre.password) {
+            setIsLoading(false);
+            setErrorMessage(
+              "Ce membre n'a pas encore d'accès configuré. L'administrateur du parti doit lui attribuer ses accès dans l'onglet « Gestion des accès »."
+            );
+            return;
+          }
+
+          if (matchingMembre.statut === "inactif") {
+            setIsLoading(false);
+            setErrorMessage("Ce compte membre a été désactivé par l'administrateur du parti.");
+            return;
+          }
+
+          const expectedPassword = matchingMembre.password;
+          if (cleanPassword === expectedPassword) {
+            loggedUser = {
+              id: matchingMembre.id || `usr-membre-${Date.now()}`,
+              nom: matchingMembre.nom || "Membre",
+              prenom: matchingMembre.prenom || "Parti",
+              email: cleanEmail,
+              userType: "membre",
+              roleTitle: matchingMembre.role || "Membre du Parti",
+              telephone: matchingMembre.telephone || "",
+              commune: matchingMembre.ville || "Port-au-Prince",
+              departement: matchingMembre.departement || "Ouest",
+            };
+          } else {
+            setIsLoading(false);
+            setErrorMessage("Mot de passe incorrect pour le compte membre.");
+            return;
+          }
         }
       }
     }
@@ -215,14 +396,15 @@ export default function LoginPage() {
     }, 300);
   };
 
-  const handleFillSuperAdmin = () => {
-    setEmail("pitonrodjy@gmail.com");
-    setPassword("Pitonrp8$");
-    setErrorMessage(null);
-  };
-
   return (
-    <div className="relative min-h-screen w-full flex flex-col items-center justify-center p-4 bg-gradient-to-br from-[#000B58] via-[#051147] to-[#010626] overflow-hidden select-none font-sans text-slate-800">
+    <div
+      className="relative min-h-screen w-full flex flex-col items-center justify-center p-4 overflow-hidden select-none font-sans text-slate-800"
+      style={{
+        backgroundColor: "#000B58",
+        backgroundImage: "linear-gradient(135deg, #000B58 0%, #051147 50%, #010626 100%)",
+        minHeight: "100vh",
+      }}
+    >
       {/* Vagues douces d'arrière-plan */}
       <div className="absolute inset-0 pointer-events-none opacity-25">
         <svg className="w-full h-full" viewBox="0 0 1440 900" fill="none" preserveAspectRatio="none">
@@ -246,9 +428,6 @@ export default function LoginPage() {
           <h1 className="text-xl font-extrabold text-slate-900 tracking-tight mt-0.5">
             Connexion au Système
           </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Vos identifiants déterminent automatiquement votre niveau d&apos;accès
-          </p>
         </div>
 
         {/* Formulaire strict : Email + Mot de passe */}
@@ -317,20 +496,6 @@ export default function LoginPage() {
             )}
           </button>
         </form>
-
-        {/* Raccourci d'assistance pour le SuperAdmin */}
-        <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between">
-          <span className="text-[10px] font-mono text-slate-400">
-            Console Plateforme
-          </span>
-          <button
-            type="button"
-            onClick={handleFillSuperAdmin}
-            className="text-[11px] font-medium text-[#000B58] hover:underline cursor-pointer"
-          >
-            Remplir compte SuperAdmin
-          </button>
-        </div>
       </div>
     </div>
   );
